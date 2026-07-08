@@ -1,0 +1,67 @@
+
+
+# mode: train
+mode: train test test_channel visual visual_proto
+# mode: test
+# mode: visual
+# mode: visual_proto
+# mode: test test_channel
+# mode: test visual visual_proto
+# mode: test_channel visual visual_proto 
+# mode: visual_anomaly 
+
+batch_size: 128
+learning_rate: 0.001
+epochs: 10
+beta: 0.25
+window_size: 100
+
+time_recon:
+  patch_size: 30
+  in_dim: 50
+  n_hiddens: 64
+  n_residual_hiddens: 64
+  n_residual_layers: 2
+  embedding_dim: 64
+  n_embeddings: 4
+  activation: gelu
+  downsample_factor: 10
+
+
+freq_recon:
+  patch_size: 20
+  in_dim: 50
+  n_hiddens: 32
+  n_residual_hiddens: 32
+  n_residual_layers: 2
+  embedding_dim: 32
+  n_embeddings: 4
+  activation: gelu
+  downsample_factor: 20
+
+aggregate: mean
+topk: 5
+alpha: 1
+beta: 1
+
+log_interval: 50
+dataset: SWAT.csv
+
+# Boolean flags in YAML use true/false
+save: true
+filename: swat  # will default to timestamp if empty
+visual_channel: [0,1,2,3]
+
+# nf:
+#   n_sensors: 50
+#   input_size: 50
+#   hidden_size: 128
+#   n_hidden: 1
+#   n_blocks: 2
+#   cond_label_size: null
+#   activation: gelu
+#   input_order: sequential
+#   batch_norm: false
+#   mode: rand
+#   epochs: 3
+#   nf_loss_weight: 0.1

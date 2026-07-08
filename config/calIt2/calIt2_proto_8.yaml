@@ -1,0 +1,48 @@
+
+# mode: train
+mode: train test test_channel visual visual_proto
+# mode: test
+# mode: visual
+# mode: visual_proto
+# mode: test test_channel
+# mode: test visual visual_proto
+# mode: test_channel visual visual_proto 
+batch_size: 128
+learning_rate: 0.001
+epochs: 3
+beta: 0.25
+window_size: 100
+
+time_recon:
+  patch_size: 10
+  in_dim: 2
+  n_hiddens: 64
+  n_residual_hiddens: 64
+  n_residual_layers: 2
+  embedding_dim: 64
+  n_embeddings: 8
+  activation: gelu
+
+
+freq_recon:
+  patch_size: 20
+  in_dim: 2
+  n_hiddens: 32
+  n_residual_hiddens: 32
+  n_residual_layers: 2
+  embedding_dim: 32
+  n_embeddings: 8
+  activation: gelu
+
+aggregate: mean
+topk: 1
+alpha: 1
+beta: 1
+
+log_interval: 50
+dataset: CalIt2.csv
+
+# Boolean flags in YAML use true/false
+save: true
+filename: calit2  # will default to timestamp if empty
+visual_channel: [0,1]

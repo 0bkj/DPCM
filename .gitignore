@@ -1,0 +1,16 @@
+
+# dir
+.vscode
+__pycache__
+data
+visual
+visualizations
+
+
+# file
+visual_data.py
+visual_param_sensitive.py
+visual_time_freq.py
+*.pth
+*.log
+*.png
