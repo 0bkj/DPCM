@@ -29,7 +29,12 @@ def data_loaders(dataset, split, batch_size):
 
 
 def load_data_and_data_loaders(file,split,window_size,step,batch_size,data_ratio=1.0):
-    if file.endswith(".csv"):
+    if file.startswith("tsb"):
+        from datasets.tsb_dataset import TSBDataset
+        # remove the prefix "tsb_" from the file name
+        file = file[4:]
+        dataset = TSBDataset(file=file,split=split,window_size=window_size, step=step)
+    elif file.endswith(".csv"):
         from datasets.tab_dataset import TABDataset
         dataset = TABDataset(file=file,split=split,window_size=window_size, step=step, data_ratio=data_ratio)
     elif file.endswith(".npy"):

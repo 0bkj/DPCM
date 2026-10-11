@@ -5,13 +5,13 @@ import yaml
 import numpy as np
 import random
 import logging
+import argparse
 
 logger = logging.getLogger(__name__)
 
 def set_seed(seed):    
     random.seed(seed)
     np.random.seed(seed)
-    random.seed(torch.seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -45,13 +45,25 @@ def readable_timestamp():
         ' ', '_').replace(':', '_').lower()
 
 
-def save_model_and_results(model, results, hyperparameters, timestamp):
+def save_model_and_results(
+    model,
+    results,
+    hyperparameters,
+    timestamp,
+    *,
+    epoch=None,
+    global_step=None,
+    seed=None,
+):
     SAVE_MODEL_PATH = os.getcwd() + '/results'
     os.makedirs(SAVE_MODEL_PATH, exist_ok=True)
     results_to_save = {
         'model': model.state_dict(),
-        # 'results': results,
-        # 'hyperparameters': hyperparameters
+        'results': results,
+        'hyperparameters': hyperparameters,
+        'epoch': epoch,
+        'global_step': global_step,
+        'seed': seed,
     }
     torch.save(results_to_save,
                SAVE_MODEL_PATH + '/' + timestamp + '.pth')
@@ -70,19 +82,38 @@ def load_config(path):
         with open(path, 'r') as f:
             data = yaml.safe_load(f)
             return data if isinstance(data, dict) else {}
-    except Exception:
-        # silent failure: return empty config on error
-        logger.error(f'Error occurred while loading config from {path}')
-        return {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise RuntimeError(f'Failed to load configuration from {path}') from exc
 
-def evaluate(pred,labels,slidingWindow=100):
+def compute_metrics(pred, labels, slidingWindow=100, metrics="auc"):
     from vus.metrics import get_metrics
     results = {}
-    results.update(get_metrics(pred, labels, metric='auc')) 
-    # results.update(get_metrics(pred, labels, metric='vus',slidingWindow=slidingWindow)) 
-    
-    for metric in results.keys():
-        logger.info(f"{metric} : {results[metric]}")
+    if isinstance(metrics, str):
+        metric_names = metrics.replace(",", " ").replace("+", " ").split()
+    else:
+        metric_names = list(metrics)
+    metric_names = [name.lower() for name in metric_names]
+    if "all" in metric_names or "both" in metric_names:
+        metric_names = ["auc", "vus"]
+    unknown = set(metric_names) - {"auc", "vus"}
+    if unknown:
+        raise ValueError(f"Unsupported metrics: {sorted(unknown)}")
+    if not metric_names:
+        raise ValueError("At least one metric must be selected.")
+    if "auc" in metric_names:
+        results.update(get_metrics(pred, labels, metric="auc"))
+    if "vus" in metric_names:
+        results.update(
+            get_metrics(pred, labels, metric="vus", slidingWindow=slidingWindow)
+        )
+    return results
+
+
+def evaluate(pred,labels,slidingWindow=100,metrics="auc"):
+    results = compute_metrics(pred, labels, slidingWindow, metrics)
+    # for metric in results.keys():
+    #     logger.info(f"{metric} : {results[metric]}")
+    return results
         
         
 def get_anomaly_segments(labels_array, anomaly_val=1):
@@ -110,14 +141,14 @@ def get_anomaly_segments(labels_array, anomaly_val=1):
     return segments
 
 
-import faiss
-
 def build_memory_index(val_vectors, use_gpu=False):
     """
     val_vectors: np.ndarray, shape (N_val, c), dtype 可以是整数
     use_gpu: 是否放到 GPU 上
     返回 faiss index
     """
+    import faiss
+
     # FAISS 的 L1 距离需要 float32
     vectors = val_vectors.astype(np.float32)
     dim = vectors.shape[1]
@@ -132,3 +163,28 @@ def build_memory_index(val_vectors, use_gpu=False):
     index.add(vectors)
     return index
 
+
+def write_metric(f,model,seed,eval_results, write_head=False):
+    if write_head:
+        f.write("seed,model")
+        for metric in eval_results.keys():
+            f.write(f",{metric}")
+        f.write("\n")
+    f.write(f"{seed},{model}")
+    for value in eval_results.values():
+        f.write(f",{value:.3f}")
+    f.write("\n")
+
+def deep_merge(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(out.get(k), dict) and isinstance(v, dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+def dic_to_namespace(config_values):
+    assert isinstance(config_values, dict), "Expected config_values to be a dict"
+    config_values = argparse.Namespace(**config_values)
+    return config_values

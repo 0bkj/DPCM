@@ -15,6 +15,7 @@ window_size: 100
 
 time_recon:
   patch_size: 20
+  patch_stride: 10
   in_dim: 9
   n_hiddens: 64
   n_residual_hiddens: 64
@@ -22,11 +23,13 @@ time_recon:
   embedding_dim: 64
   n_embeddings: 8
   activation: gelu
+  top_k: 3
   downsample_factor: 20
 
 
 freq_recon:
   patch_size: 17
+  patch_stride: 8
   in_dim: 9
   n_hiddens: 32
   n_residual_hiddens: 32
@@ -34,11 +37,11 @@ freq_recon:
   embedding_dim: 32
   n_embeddings: 8
   activation: gelu
+  top_k: 3
   downsample_factor: 17
 
 topk: 3
 alpha: 1
-beta: 1
 
 log_interval: 50
 dataset: GECCO.csv

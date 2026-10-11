@@ -15,6 +15,7 @@ window_size: 100
 
 time_recon:
   patch_size: 20
+  patch_stride: 10
   in_dim: 38
   n_hiddens: 64
   n_residual_hiddens: 64
@@ -27,6 +28,7 @@ time_recon:
 
 freq_recon:
   patch_size: 17
+  patch_stride: 8
   in_dim: 38
   n_hiddens: 32
   n_residual_hiddens: 32
@@ -38,8 +40,6 @@ freq_recon:
 
 aggregate: mean
 topk: 3
-alpha: 1
-beta: 1
 
 log_interval: 50
 dataset: SWAN.csv

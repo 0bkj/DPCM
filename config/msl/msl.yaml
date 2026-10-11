@@ -15,30 +15,30 @@ window_size: 100
 
 time_recon:
   patch_size: 10
+  patch_stride: 10
   in_dim: 1
   n_hiddens: 64
   n_residual_hiddens: 64
   n_residual_layers: 2
-  embedding_dim: 64
-  n_embeddings: 16
+  embedding_dim: 128
+  n_embeddings: 64
   activation: gelu
   top_k: 3
 
 freq_recon:
   patch_size: 20
+  patch_stride: 20
   in_dim: 1
   n_hiddens: 32
   n_residual_hiddens: 32
   n_residual_layers: 2
-  embedding_dim: 32
-  n_embeddings: 16
+  embedding_dim: 128
+  n_embeddings: 64
   activation: gelu
   top_k: 3
   
 aggregate: mean
 topk: 2
-alpha: 1
-beta: 1
 
 log_interval: 50
 dataset: MSL.csv

@@ -10,13 +10,10 @@ import torch
 import logging
 from torch.nn import functional as F
 import matplotlib.pyplot as plt
-from utils import build_memory_index, evaluate, get_anomaly_segments
+from utils import build_memory_index, evaluate, get_anomaly_segments, write_metric
 from matplotlib import pyplot as plt
-from sklearn.cluster import KMeans
-from scipy.spatial.distance import cdist
-from seriate import seriate
-from python_tsp.heuristics import solve_tsp_simulated_annealing
 import shutil
+from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 
@@ -86,16 +83,21 @@ class Solver:
         ).to(self.device)
 
     def load_model(self):
-        if not hasattr(self, "loaded"):
-            self.model.load_state_dict(
-                torch.load("./results/" + self.args.filename + ".pth", weights_only=False)["model"]
-            )
-            self.model.eval()
-            print("@ loaded VQ-VAE model from ./results/" + self.args.filename + ".pth")
-            print("@ set model to eval mode")
-            self.loaded = True
-        else:
-            print("@ model already loaded")
+        try:
+            if not hasattr(self, "loaded"):
+                self.model.load_state_dict(
+                    torch.load(f"./results/{self.args.filename}_seed{self.args.seed}.pth", weights_only=False)["model"]
+                )
+                self.model.eval()
+                print("@ loaded VQ-VAE model from ./results/" + self.args.filename + ".pth")
+                print("@ set model to eval mode")
+                self.loaded = True
+                return True
+            else:
+                print("@ model already loaded")
+                return False
+        except:
+            return False
         
     def train_update(self, x):
         """
@@ -197,38 +199,25 @@ class Solver:
         self.results = {}
         total_updates = 0
         self.active_codes = None
-        for epoch in range(1, self.args.epochs + 1):
-            for x, _ in training_loader:
+        for epoch in tqdm(range(1, self.args.epochs + 1), desc="Training Epochs"):
+            for x, _ in tqdm(training_loader, desc=f"Epoch {epoch}", leave=False):
                 x = x.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 loss = self.train_update(x)
                 loss.backward()
                 optimizer.step()
-                if total_updates % self.args.log_interval == 0:
-                    if self.args.save:
-                        utils.save_model_and_results(self.model,None,None,self.args.filename,)
-                    print(
-                        f'Update # {total_updates},Recon Error: {(self.results["recon_errors"]):.4f}, Emb_loss: {(self.results["emb_loss"]):.4f}, time_Perplexity: {(self.results["time_perplexities"]):.0f}, freq_Perplexity: {(self.results["freq_perplexities"]):.0f}'
-                    )
                 total_updates += 1
-                
+            tqdm.write(f'Update # {total_updates},Recon Error: {(self.results["recon_errors"]):.4f}, Emb_loss: {(self.results["emb_loss"]):.4f}, time_Perplexity: {(self.results["time_perplexities"]):.0f}, freq_Perplexity: {(self.results["freq_perplexities"]):.0f}')
+        if self.args.save:
+            utils.save_model_and_results(
+                self.model,
+                self.results,
+                vars(self.args).copy(),
+                f"{self.args.filename}_seed{self.args.seed}",
+                epoch=self.args.epochs,
+                global_step=total_updates,
+            )
         print("-" * 20 + "End Train" + "-" * 20)
-
-    def test(self):
-        """
-        test model 
-        """
-        print("\n\n"+"-" * 20 + "test".center(20,"-") + "-" * 20)
-        self.load_model()
-        test_data, test_loader = self.load_data(split="test")
-        self.model.eval()
-        ori_data, recon_data, labels, losses = self.test_template(
-           test_data, test_loader
-        )
-        
-        self.evaluate(losses,labels)
-        self.draw_loss(labels, losses, prefix="test")
-        print("-" * 20 + "End Test".center(20,"-") + "-" * 20)
              
     def visual_train(self):
         """
@@ -266,7 +255,7 @@ class Solver:
 
         ori_data, recon_data, labels, losses = self.test_template(validation_data, validation_loader)
 
-        self.evaluate(losses,labels)
+        # self.evaluate(losses,labels)
         # logger.info(f"[Number of Anomaly segments]: {len(seg)}")
 
         self.draw_pic(ori_data, recon_data, labels, losses, channels, "test", True)
@@ -276,24 +265,26 @@ class Solver:
         '''
         save quantized indices
         '''
-        if not (os.path.exists(f"data/indices/time_{self.args.filename}.npy") and os.path.exists(f"data/indices/freq_{self.args.filename}.npy")):
-            print("\n\n"+"-" * 20 + "Saving Indices".center(20) + "-" * 20)
-            os.makedirs("data/indices/", exist_ok=True)
-            validation_data, validation_loader = self.load_data(split="val")
-            
-            self.time_indices = []
-            self.freq_indices = []
-            for x, _ in validation_loader:
-                x = x.to(self.device, non_blocking=True)
-                self.save_indices_update(x)
-            self.time_indices = torch.cat(self.time_indices).to(dtype=torch.float32)
-            self.time_indices = self.time_indices.cpu().numpy()
-            np.save(f"data/indices/time_{self.args.filename}.npy", self.time_indices)
-            
-            self.freq_indices = torch.cat(self.freq_indices).to(dtype=torch.float32)
-            self.freq_indices = self.freq_indices.cpu().numpy()
-            np.save(f"data/indices/freq_{self.args.filename}.npy", self.freq_indices)
-            print("-" * 20 + "End Saving Indices".center(20) + "-" * 20)
+        if getattr(self, "_indices_saved_for_current_solver", False):
+            return
+        print("\n\n"+"-" * 20 + "Saving Indices".center(20) + "-" * 20)
+        os.makedirs("data/indices/", exist_ok=True)
+        validation_data, validation_loader = self.load_data(split="val")
+        
+        self.time_indices = []
+        self.freq_indices = []
+        for x, _ in validation_loader:
+            x = x.to(self.device, non_blocking=True)
+            self.save_indices_update(x)
+        self.time_indices = torch.cat(self.time_indices).to(dtype=torch.float32)
+        self.time_indices = self.time_indices.cpu().numpy()
+        np.save(f"data/indices/time_{self.args.filename}.npy", self.time_indices)
+        
+        self.freq_indices = torch.cat(self.freq_indices).to(dtype=torch.float32)
+        self.freq_indices = self.freq_indices.cpu().numpy()
+        np.save(f"data/indices/freq_{self.args.filename}.npy", self.freq_indices)
+        self._indices_saved_for_current_solver = True
+        print("-" * 20 + "End Saving Indices".center(20) + "-" * 20)
               
     def load_indices(self, split="train"):
         if split == "train":
@@ -362,6 +353,7 @@ class Solver:
         return t_dataset, t_loader, f_dataset, f_loader
 
     def build_ngram(self):
+        """Fit the temporal scorer and the variable n-gram scorer on normal codes."""
         from models.n_gram import TimeNGramDetector, VarNGramDetector
         import time
         self.load_model()
@@ -377,25 +369,69 @@ class Solver:
         start = time.time()
         self.time_ngram = TimeNGramDetector(
             channels=train_codes.shape[1],
-            order=3,
+            order=self.args.time_ngram_order,
             alpha=0.1,
         ).fit(train_codes)
         print(f"训练通道级 n-gram 模型耗时: {time.time() - start:.2f} 秒")
         start = time.time()
         self.var_ngram = VarNGramDetector(
-            order=2,
+            order=self.args.var_ngram_order,
             alpha=0.1,
         ).fit(train_codes)
         print(f"训练联合状态 n-gram 模型耗时: {time.time() - start:.2f} 秒")
         pass
 
-    def test_channel_update(self, dataset, test_loader):
+    def collect_time_codes(self, split="train"):
+        """Extract first-codebook states from a normal split without training."""
+        dataset, loader = self.load_data(split=split)
+        collected = []
+        self.model.eval()
+        with torch.inference_mode():
+            for x, _ in loader:
+                b, _, c = x.shape
+                x = x.to(self.device, non_blocking=True)
+                _, _, _, _, time_indices, _ = self.model(x, indices=True)
+                codes = einops.rearrange(
+                    time_indices[..., 0], "(b c) t -> b c t", b=b, c=c
+                )
+                collected.append(codes.detach().cpu().numpy().astype(np.int32, copy=False))
+        if not collected:
+            raise RuntimeError(f"No prototype states were extracted from {split} split")
+        return np.concatenate(collected, axis=0)
+
+    def build_chow_liu_vcpm(self):
+        """Fit a post-hoc Chow--Liu VCPM only on normal training states."""
+        from models.n_gram import ChowLiuVCPMDetector
+
+        self.load_model()
+        train_codes = self.collect_time_codes(split="train")
+        self.chow_liu_vcpm = ChowLiuVCPMDetector(
+            n_states=int(self.args.time_recon.n_embeddings),
+            state_modulo=int(self.args.time_recon.n_embeddings),
+            gamma=getattr(self.args, "vcpm_gamma", 0.1),
+            tree_weight=getattr(self.args, "vcpm_tree_weight", "nmi"),
+            epsilon=getattr(self.args, "vcpm_epsilon", 1e-6),
+        ).fit(train_codes)
+        print(f"Chow--Liu VCPM: fitted {len(self.chow_liu_vcpm.edges)} dependency edges")
+
+    def test_channel_update(
+        self, dataset, test_loader, continuous_temporal=False, variable_detector=None
+    ):
+        """Score a split and optionally evaluate temporal tokens as one causal stream.
+
+        The validation/test loaders are chronological and use non-overlapping raw
+        windows.  Concatenate their latent tokens in that order so temporal AR or
+        n-gram context crosses a window boundary instead of backing off at every
+        window start.  Variable scores and reconstruction remain defined per
+        window, as in the original DPCM implementation.
+        """
         ori_data = []
         recon_data = []
         labels = []
         recon_losses = []
-        time_ngram_scores = []
         var_ngram_scores = []
+        time_code_windows = []
+        variable_detector = variable_detector or self.var_ngram
         with torch.inference_mode():
             for x, label in test_loader:
                 b, t, c = x.shape
@@ -408,76 +444,262 @@ class Solver:
                 codes = codes.detach().cpu().numpy().astype(np.int32, copy=False)
                 if self.shuffle_channel_flag:
                     codes, indices = self.shuffle_channel(codes, seed=self.seed)
-                ch_scores = self.time_ngram.score(codes, aggregate=self.args.aggregate, topk=self.args.topk)
-                joint_scores = self.var_ngram.score(codes, aggregate=self.args.aggregate, topk=self.args.topk)
+                time_code_windows.append(codes)
+                joint_scores = variable_detector.score(codes, aggregate=self.args.aggregate, topk=self.args.topk)
                 recon_loss = torch.mean((x_hat - x) ** 2, dim=-1).detach().cpu().numpy()
-                def upsample_latent_scores(scores, target_length):
-                    """
-                    scores:
-                        [b, latent_t] or [b, c, latent_t]
-                    return:
-                        [b, target_length] or [b, c, target_length]
-                    """
-                    latent_time = scores.shape[-1]
-                    repeat_factor = max(1, int(np.ceil(target_length / latent_time)))
-                    scores = np.repeat(scores, repeat_factor, axis=-1)
-                    return scores[..., :target_length]
-                ch_scores = upsample_latent_scores(ch_scores, t)
-                joint_scores = upsample_latent_scores(joint_scores, t)
+                latent_time = joint_scores.shape[-1]
+                repeat_factor = max(1, int(np.ceil(t / latent_time)))
+                joint_scores = np.repeat(joint_scores, repeat_factor, axis=-1)[..., :t]
 
                 ori_data.append(x.cpu().detach().numpy())
                 recon_data.append(x_hat.cpu().detach().numpy())
                 labels.append(label.detach().cpu().numpy())
                 recon_losses.append(recon_loss)
-                time_ngram_scores.append(ch_scores)
                 var_ngram_scores.append(joint_scores)
+
+        # ``[window, channel, latent] -> [1, channel, global_latent_time]``.
+        # This preserves the chronological window order from a non-shuffled
+        # loader while allowing a causal AR context to survive window boundaries.
+        time_code_windows = np.concatenate(time_code_windows, axis=0)
+        windows, channels, latent_time = time_code_windows.shape
+        if continuous_temporal:
+            continuous_codes = time_code_windows.transpose(1, 0, 2).reshape(
+                1, channels, windows * latent_time
+            )
+            temporal_scores = self.time_ngram.score(
+                continuous_codes, aggregate=self.args.aggregate, topk=self.args.topk
+            ).reshape(windows, latent_time)
+        else:
+            temporal_scores = self.time_ngram.score(
+                time_code_windows, aggregate=self.args.aggregate, topk=self.args.topk
+            )
+        repeat_factor = max(1, int(np.ceil(t / latent_time)))
+        time_ngram_scores = np.repeat(temporal_scores, repeat_factor, axis=-1)[..., :t]
 
         labels = np.concatenate(labels, axis=0).reshape(-1)
         ori_data = np.concatenate(ori_data, axis=0).reshape(-1, dataset.data.shape[-1])
         recon_data = np.concatenate(recon_data, axis=0).reshape(-1, dataset.data.shape[-1])
         recon_losses = np.concatenate(recon_losses, axis=0).reshape(-1)
-        time_ngram_scores = np.concatenate(time_ngram_scores, axis=0).reshape(-1)
+        time_ngram_scores = time_ngram_scores.reshape(-1)
         var_ngram_scores = np.concatenate(var_ngram_scores, axis=0).reshape(-1)
 
         return ori_data, recon_data, recon_losses, time_ngram_scores, var_ngram_scores, labels
 
-    def test_channel(self):
-        
-        print("\n\n" + "-" * 20 + "Channel Test".center(25) + "-" * 20)
+    def fit_channel_score_calibration(
+        self, calibration_dataset, calibration_loader, continuous_temporal=False,
+        variable_detector=None,
+    ):
+        """Fit legacy and empirical upper-tail calibrators on normal data only."""
+        _, _, recon_losses, time_scores, variable_scores, _ = self.test_channel_update(
+            calibration_dataset, calibration_loader,
+            continuous_temporal=continuous_temporal,
+            variable_detector=variable_detector,
+        )
+        def bounds(values):
+            return float(values.min()), float(values.max())
+
+        return {
+            "legacy": {
+                "reconstruction": bounds(recon_losses),
+                "temporal": bounds(time_scores),
+                "variable": bounds(variable_scores),
+            },
+            # Keep the complete normal reference distribution for ECDF upper
+            # tails.  Unlike min-max, this does not make a modality's fusion
+            # weight depend on one extreme calibration point.
+            "ecdf": {
+                "reconstruction": np.sort(recon_losses.astype(np.float64, copy=False)),
+                "temporal": np.sort(time_scores.astype(np.float64, copy=False)),
+                "variable": np.sort(variable_scores.astype(np.float64, copy=False)),
+            },
+        }
+
+    def apply_channel_score_calibration(self, scores, calibration_bounds):
+        """Apply legacy upper-tail calibration to scores."""
+        lower, upper = calibration_bounds
+        calibrated = (scores - lower) / (upper - lower + 1e-5)
+        return np.clip(calibrated, 0.0, 1.0)
+
+    @staticmethod
+    def ecdf_upper_tail_evidence(scores, sorted_reference):
+        """Map high-is-anomalous scores to -log empirical upper-tail mass.
+
+        p(s) = (1 + #{c in calibration: c >= s}) / (n + 1).  The finite
+        sample correction makes the largest possible evidence -log(1/(n+1))
+        and exposes, rather than hides, tail saturation.
+        """
+        values = np.asarray(scores, dtype=np.float64)
+        reference = np.asarray(sorted_reference, dtype=np.float64)
+        if reference.ndim != 1 or reference.size == 0:
+            raise ValueError("ECDF reference must be a non-empty sorted vector")
+        rank_below = np.searchsorted(reference, values, side="left")
+        p_upper = (reference.size - rank_below + 1.0) / (reference.size + 1.0)
+        evidence = -np.log(p_upper)
+        diagnostics = {
+            "calibration_size": int(reference.size),
+            "saturation_fraction": float(np.mean(values > reference[-1])),
+            "maximum_evidence": float(-np.log(1.0 / (reference.size + 1.0))),
+        }
+        return evidence.astype(np.float32, copy=False), diagnostics
+    
+    def get_channel_score_components(self, variable_detector=None):
+        """Return calibrated score components and test labels without evaluation side effects."""
         self.load_model()
-        self.shuffle_channel_flag = False
-        self.seed = 41
         self.build_ngram()
-        # -------------------------------
-        # 加载测试数据
-        # -------------------------------
-        dataset, test_loader = self.load_data(split="test")
+        # Apply the same continuous token sequence convention to calibration
+        # and testing, so temporal n-gram contexts do not reset at boundaries.
+        continuous_temporal = True
+        calibration_dataset, calibration_loader = self.load_data(split="val")
+        test_dataset, test_loader = self.load_data(split="test")
+        score_calibration = self.fit_channel_score_calibration(
+            calibration_dataset, calibration_loader,
+            continuous_temporal=continuous_temporal,
+            variable_detector=variable_detector,
+        )
+        _, _, reconstruction, temporal, variable, labels = self.test_channel_update(
+            test_dataset, test_loader,
+            continuous_temporal=continuous_temporal,
+            variable_detector=variable_detector,
+        )
+        tail_reconstruction, reconstruction_tail_info = self.ecdf_upper_tail_evidence(
+            reconstruction, score_calibration["ecdf"]["reconstruction"]
+        )
+        tail_temporal, temporal_tail_info = self.ecdf_upper_tail_evidence(
+            temporal, score_calibration["ecdf"]["temporal"]
+        )
+        tail_variable, variable_tail_info = self.ecdf_upper_tail_evidence(
+            variable, score_calibration["ecdf"]["variable"]
+        )
+        return {
+            "raw_reconstruction": reconstruction,
+            "raw_temporal": temporal,
+            "raw_variable": variable,
+            "reconstruction": self.apply_channel_score_calibration(
+                reconstruction, score_calibration["legacy"]["reconstruction"]
+            ),
+            "temporal": self.apply_channel_score_calibration(
+                temporal, score_calibration["legacy"]["temporal"]
+            ),
+            "variable": (
+                self.apply_channel_score_calibration(
+                    variable, score_calibration["legacy"]["variable"]
+                )
+            ),
+            "labels": labels,
+            "calibration": score_calibration,
+            "tail_evidence": {
+                "reconstruction": tail_reconstruction,
+                "temporal": tail_temporal,
+                "variable": tail_variable,
+            },
+            "tail_diagnostics": {
+                "reconstruction": reconstruction_tail_info,
+                "temporal": temporal_tail_info,
+                "variable": variable_tail_info,
+            },
+        }
+    
+    def report_origin_vcpm(self, prefix, minmax_vcpm, ecdf_vcpm, ablation):
+        components = self.get_channel_score_components()
+        recon_losses = components["reconstruction"]
+        time_ngram_scores = components["temporal"]
+        var_ngram_scores = components["variable"]
+        labels = components["labels"]
+
+        if minmax_vcpm:
+            time_loss = recon_losses + time_ngram_scores
+            var_loss = recon_losses + var_ngram_scores
+            losses = recon_losses + time_ngram_scores + var_ngram_scores
+            result_file = f"{self.args.filename}.csv"
+            result_file = os.path.join(prefix,result_file)
+            with open(result_file, "a+") as f:
+                if ablation:
+                    write_metric(f,"dpr", self.args.seed, self.evaluate(recon_losses,labels), write_head=True)
+                    write_metric(f,"dpr+tstm", self.args.seed, self.evaluate(time_loss,labels))
+                    write_metric(f,"dpr+vcpm", self.args.seed, self.evaluate(var_loss,labels))
+                    write_metric(f,"dpcm", self.args.seed, self.evaluate(losses,labels))
+                else:
+                    write_metric(f,"dpcm", self.args.seed, self.evaluate(losses,labels), write_head=True)
+                f.write("\n")
+
+        if ecdf_vcpm:
+            tail_evidence = components["tail_evidence"]
+            # Equal-weight evidence fusion.  These are already comparable
+            # normal-tail evidences, so no subsequent min-max normalization occurs.
+            ecdf_time_loss = (tail_evidence["reconstruction"] + tail_evidence["temporal"]) / 2.0
+            ecdf_var_loss = (tail_evidence["reconstruction"] + tail_evidence["variable"]) / 2.0
+            ecdf_losses = (tail_evidence["reconstruction"] + tail_evidence["temporal"] + tail_evidence["variable"]) / 3.0
+            ecdf_result_file = f"{self.args.filename}_ecdf_fusion.csv"
+            ecdf_result_file = os.path.join(prefix,ecdf_result_file)
+            with open(ecdf_result_file, "a+") as f:
+                if ablation:
+                    write_metric(f, "dpr", self.args.seed, self.evaluate(recon_losses, labels), write_head=True)
+                    write_metric(f, "dpr+tstm", self.args.seed, self.evaluate(ecdf_time_loss, labels))
+                    write_metric(f, "dpr+vcpm", self.args.seed, self.evaluate(ecdf_var_loss, labels))
+                    write_metric(f, "dpcm", self.args.seed, self.evaluate(ecdf_losses, labels))
+                else:
+                    write_metric(f, "dpr", self.args.seed, self.evaluate(ecdf_losses, labels), write_head=True)
+                f.write("\n")   
+
+    def report_chowliu_vcpm(self, prefix, minmax_tree, ecdf_tree, ablation):
+        self.build_chow_liu_vcpm()
+        tree_components = self.get_channel_score_components(variable_detector=self.chow_liu_vcpm)
+        recon_losses = tree_components["reconstruction"]
+        labels = tree_components["labels"]
+
+        if minmax_tree:
+            tree_var_scores = tree_components["variable"]
+            tree_time_scores = tree_components["temporal"]
+            tree_time_loss = recon_losses + tree_time_scores
+            tree_var_loss = recon_losses + tree_var_scores
+            tree_losses = recon_losses +  tree_time_scores + tree_var_scores
+            chowliu_result_file =  f"{self.args.filename}_chowliu.csv"
+            chowliu_result_file = os.path.join(prefix,chowliu_result_file)
+            with open(chowliu_result_file, "a+") as f:
+                if ablation:
+                    write_metric(f,"dpr", self.args.seed, self.evaluate(recon_losses,labels), write_head=True)
+                    write_metric(f,"dpr+tstm", self.args.seed, self.evaluate(tree_time_loss,labels))
+                    write_metric(f,"dpr+vcpm", self.args.seed, self.evaluate(tree_var_loss,labels))
+                    write_metric(f,"dpcm", self.args.seed, self.evaluate(tree_losses,labels))
+                else:
+                    write_metric(f,"dpcm", self.args.seed, self.evaluate(tree_losses,labels), write_head=True)
+                f.write("\n")
+
+        if ecdf_tree:
+            tail_evidence = tree_components["tail_evidence"]
+            # Equal-weight evidence fusion.  These are already comparable
+            # normal-tail evidences, so no subsequent min-max normalization occurs.
+            ecdf_time_loss = (tail_evidence["reconstruction"] + tail_evidence["temporal"]) / 2.0
+            ecdf_var_loss = (tail_evidence["reconstruction"] + tail_evidence["variable"]) / 2.0
+            ecdf_losses = (tail_evidence["reconstruction"] + tail_evidence["temporal"] + tail_evidence["variable"]) / 3.0
+            ecdf_result_file = f"{self.args.filename}_chowliu_ecdf_fusion.csv"
+            ecdf_result_file = os.path.join(prefix, ecdf_result_file)
+            with open(ecdf_result_file, "a+") as f:
+                if ablation:
+                    write_metric(f, "dpr", self.args.seed, self.evaluate(recon_losses, labels), write_head=True)
+                    write_metric(f, "dpr+tstm", self.args.seed, self.evaluate(ecdf_time_loss, labels))
+                    write_metric(f, "dpr+vcpm", self.args.seed, self.evaluate(ecdf_var_loss, labels))
+                    write_metric(f, "dpcm", self.args.seed, self.evaluate(ecdf_losses, labels))
+                else:
+                    write_metric(f, "dpcm", self.args.seed, self.evaluate(ecdf_losses, labels), write_head=True)
+                f.write("\n")   
+        
+    def test(self):
+        print("\n\n" + "-" * 20 + "Channel Test".center(25) + "-" * 20)
+        self.shuffle_channel_flag = False
         self.model.eval()
+        reports = self.args.report_variant.split(" ")
+        minmax_vcpm = "minmax_vcpm" in reports
+        ecdf_vcpm = "ecdf_vcpm" in reports
+        minmax_tree = "minmax_tree" in reports
+        ecdf_tree = "ecdf_tree" in reports
+        prefix = "report"
+        ablation = self.args.ablation
+        os.makedirs(prefix, exist_ok=True)
+        self.report_origin_vcpm(prefix, minmax_vcpm, ecdf_vcpm, ablation)
+        self.report_chowliu_vcpm(prefix, minmax_tree, ecdf_tree, ablation)
 
-        def min_max_normalize(values, eps=1e-8):
-            v_min = values.min()
-            v_max = values.max()
-            return (values - v_min) / (v_max - v_min + eps)
-        
-        ori_data, recon_data, recon_losses, time_ngram_scores, var_ngram_scores, labels = self.test_channel_update(dataset, test_loader)
-        recon_losses = min_max_normalize(recon_losses)
-        time_ngram_scores = min_max_normalize(time_ngram_scores)
-        var_ngram_scores = min_max_normalize(var_ngram_scores)
-        
-        time_loss = recon_losses + self.args.alpha * time_ngram_scores
-        var_loss = recon_losses + self.args.beta * var_ngram_scores
-        losses = recon_losses + self.args.alpha * time_ngram_scores + self.args.beta * var_ngram_scores
 
-        print("@ var score")
-        self.evaluate(var_loss,labels)
-        self.draw_loss(labels, var_loss, prefix="channel_var_time")
-        print("@ time score")
-        self.evaluate(time_loss,labels)
-        self.draw_loss(labels, time_loss, prefix="channel_time_time")
-        print("@ recon loss + time score + time_time score")
-        self.evaluate(losses,labels)
-        self.draw_loss(labels, losses, prefix="channel_test")
-         
     def draw_pic(self, ori_data, recon_data, labels, loss, channels, prefix, draw_seg=False):
         os.makedirs(f"visual/{self.args.filename}", exist_ok=True)
         draw_length = min(len(ori_data), 10000)
@@ -660,7 +882,12 @@ class Solver:
         return ori_data, recon_data, recon_losses, channel_ngram_scores, joint_ngram_scores, labels
 
     def evaluate(self, pred, labels):
-        utils.evaluate(pred, labels, self.args.window_size)
+        return evaluate(
+            pred,
+            labels,
+            self.args.window_size,
+            getattr(self.args, "metrics", "auc"),
+        )
         
     def shuffle_channel(self, data, seed=None):
         """

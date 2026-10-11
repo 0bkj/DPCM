@@ -5,7 +5,8 @@ __pycache__
 data
 visual
 visualizations
-
+/draw
+exp
 
 # file
 visual_data.py

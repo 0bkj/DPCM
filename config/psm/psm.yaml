@@ -1,27 +1,28 @@
 
-mode: train
+# mode: train
 # mode: train test test_channel visual visual_proto
 # mode: test
 # mode: visual
 # mode: visual_proto
-# mode: test test_channel
+mode: test test_channel
 # mode: test visual visual_proto
 # mode: test_channel visual visual_proto
 # mode: visual_anomaly 
 
 batch_size: 128
 learning_rate: 0.001
-epochs: 10
-beta: 0.25
+epochs: 5
+beta: 1
 window_size: 100
 
 time_recon:
   patch_size: 10
+  patch_stride: 10
   in_dim: 25
   n_hiddens: 32
   n_residual_hiddens: 32
   n_residual_layers: 2
-  embedding_dim: 32
+  embedding_dim: 128
   n_embeddings: 32
   activation: gelu
   top_k: 3
@@ -30,19 +31,19 @@ time_recon:
 
 freq_recon:
   patch_size: 10
+  patch_stride: 10
   in_dim: 25
   n_hiddens: 32
   n_residual_hiddens: 32
   n_residual_layers: 2
-  embedding_dim: 32
+  embedding_dim: 128
   n_embeddings: 32
   activation: gelu
   top_k: 3
   
 aggregate: mean
 topk: 2
-alpha: 1
-beta: 1
+
 
 log_interval: 200
 dataset: PSM.csv

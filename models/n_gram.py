@@ -344,6 +344,203 @@ class VarNGramDetector:
         return _aggregate(all_scores, aggregate, topk).numpy().astype(np.float32, copy=False)
 
 
+class ChowLiuVCPMDetector:
+    """Tree-structured variable-collaboration scorer for discrete VQ states.
+
+    The detector is deliberately a post-hoc statistical component: it only
+    consumes normal training-set code indices and never changes VQ-VAE weights.
+    A maximum-weight spanning tree is learned with (normalized) mutual
+    information, then each selected edge owns its own smoothed conditional
+    2-gram table.  The test score is the normalized negative log likelihood
+    of the resulting Chow--Liu tree factorization.
+    """
+
+    def __init__(
+        self,
+        n_states: Optional[int] = None,
+        state_modulo: Optional[int] = None,
+        gamma: float = 0.1,
+        tree_weight: str = "nmi",
+        epsilon: float = 1e-6,
+    ):
+        if n_states is not None and n_states < 1:
+            raise ValueError("n_states must be >= 1")
+        if state_modulo is not None and state_modulo < 1:
+            raise ValueError("state_modulo must be >= 1")
+        if gamma <= 0:
+            raise ValueError("gamma must be > 0")
+        if tree_weight not in {"mi", "nmi"}:
+            raise ValueError("tree_weight must be 'mi' or 'nmi'")
+        self.n_states = n_states
+        self.state_modulo = state_modulo
+        self.gamma = float(gamma)
+        self.tree_weight = tree_weight
+        self.epsilon = float(epsilon)
+        self.edges = []
+        self.edge_weights = []
+        self.mutual_information = None
+        self.normalized_mutual_information = None
+        self._fitted = False
+
+    @staticmethod
+    def _maximum_spanning_tree(weights: np.ndarray):
+        """Kruskal's algorithm without adding a scipy/networkx dependency."""
+        channels = weights.shape[0]
+        parent = list(range(channels))
+
+        def find(node):
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        edges = sorted(
+            ((float(weights[i, j]), i, j) for i in range(channels) for j in range(i + 1, channels)),
+            reverse=True,
+        )
+        tree = []
+        for weight, i, j in edges:
+            root_i, root_j = find(i), find(j)
+            if root_i == root_j:
+                continue
+            parent[root_i] = root_j
+            tree.append((i, j, weight))
+            if len(tree) == channels - 1:
+                break
+        return tree
+
+    def _validate_codes(self, codes: TensorLike) -> np.ndarray:
+        x = _as_long_tensor(codes)
+        if x.ndim != 3:
+            raise ValueError("codes must be [num_samples, channels, latent_time]")
+        x = x.detach().cpu().numpy().astype(np.int64, copy=False)
+        if x.size == 0:
+            raise ValueError("codes must not be empty")
+        if x.min() < 0:
+            raise ValueError("prototype states must be non-negative")
+        # DPCM stores channel-local prototypes in disjoint global blocks
+        # (channel * K + local_state).  Chow--Liu operates on Q_i in
+        # {1,...,K}, so restore the local state before estimating dependence.
+        if self.state_modulo is not None:
+            x = np.mod(x, self.state_modulo)
+        if self.n_states is not None and x.max() >= self.n_states:
+            raise ValueError("code index exceeds n_states")
+        return x
+
+    @torch.no_grad()
+    def fit(self, train_codes: TensorLike):
+        x = self._validate_codes(train_codes)
+        samples, channels, latent_time = x.shape
+        self.channels = channels
+        self.n_states = int(self.n_states or (int(x.max()) + 1))
+        states = x.transpose(0, 2, 1).reshape(samples * latent_time, channels)
+        total = states.shape[0]
+        k = self.n_states
+
+        counts = np.empty((channels, k), dtype=np.float64)
+        marginals = np.empty((channels, k), dtype=np.float64)
+        entropy = np.empty(channels, dtype=np.float64)
+        denominator = total + self.gamma * k
+        for channel in range(channels):
+            counts[channel] = np.bincount(states[:, channel], minlength=k)
+            marginals[channel] = (counts[channel] + self.gamma) / denominator
+            entropy[channel] = -np.sum(marginals[channel] * np.log(marginals[channel]))
+
+        mi = np.zeros((channels, channels), dtype=np.float64)
+        nmi = np.zeros((channels, channels), dtype=np.float64)
+        joint_probabilities = {}
+        for i in range(channels):
+            for j in range(i + 1, channels):
+                pair_counts = np.bincount(
+                    states[:, i] * k + states[:, j], minlength=k * k
+                ).astype(np.float64)
+                joint = (pair_counts.reshape(k, k) + self.gamma) / (total + self.gamma * k * k)
+                value = float(np.sum(joint * np.log(joint / (marginals[i, :, None] * marginals[j, None, :]))))
+                mi[i, j] = mi[j, i] = value
+                nmi_value = value / np.sqrt(max(entropy[i] * entropy[j], self.epsilon))
+                nmi[i, j] = nmi[j, i] = nmi_value
+                joint_probabilities[(i, j)] = joint
+
+        weights = nmi if self.tree_weight == "nmi" else mi
+        tree = self._maximum_spanning_tree(weights)
+        self.edges = [(i, j) for i, j, _ in tree]
+        self.edge_weights = [weight for _, _, weight in tree]
+        self.marginals = marginals
+        self.joint_probabilities = {(i, j): joint_probabilities[(i, j)] for i, j in self.edges}
+        self.mutual_information = mi
+        self.normalized_mutual_information = nmi
+
+        # Orient the undirected tree once.  This does not reintroduce an
+        # arbitrary channel chain: every conditional remains tied to a true
+        # Chow--Liu edge.  A high-degree root yields a compact, deterministic
+        # factorization; all roots describe the same unsmoothed tree density.
+        adjacency = [[] for _ in range(channels)]
+        for i, j in self.edges:
+            adjacency[i].append(j)
+            adjacency[j].append(i)
+        self.root = max(range(channels), key=lambda node: (len(adjacency[node]), -node))
+        visited = {self.root}
+        frontier = [self.root]
+        self.directed_edges = []
+        while frontier:
+            parent = frontier.pop(0)
+            for child in sorted(adjacency[parent]):
+                if child in visited:
+                    continue
+                visited.add(child)
+                frontier.append(child)
+                self.directed_edges.append((parent, child))
+
+        self.conditionals = {}
+        for parent, child in self.directed_edges:
+            key = (min(parent, child), max(parent, child))
+            joint = self.joint_probabilities[key]
+            # Stored pair tables are ordered by their ascending channel ids.
+            if parent > child:
+                joint = joint.T
+            self.conditionals[(parent, child)] = joint / joint.sum(axis=1, keepdims=True)
+        self._fitted = True
+        return self
+
+    def _tree_nll(self, x: np.ndarray) -> np.ndarray:
+        """Negative log p(root) - sum log p(child | parent), per latent time."""
+        batch, _, latent_time = x.shape
+        root_state = x[:, self.root, :]
+        nll = -np.log(np.maximum(self.marginals[self.root][root_state], self.epsilon))
+        for parent, child in self.directed_edges:
+            conditional = self.conditionals[(parent, child)]
+            nll -= np.log(np.maximum(
+                conditional[x[:, parent, :], x[:, child, :]], self.epsilon
+            ))
+        # Match the original variable n-gram's mean-per-variable convention.
+        return nll / max(1, self.channels)
+
+    @torch.no_grad()
+    def score(self, test_codes: TensorLike, aggregate="mean", topk=3):
+        del aggregate, topk  # Tree edges are always averaged as defined by VCPM.
+        if not self._fitted:
+            raise RuntimeError("fit() must be called before score()")
+        x = self._validate_codes(test_codes)
+        if x.shape[1] != self.channels:
+            raise ValueError("test channel count differs from fitted detector")
+        return self._tree_nll(x).astype(np.float32, copy=False)
+
+    def summary(self):
+        """Small serializable record for experiment artifacts and paper tables."""
+        return {
+            "channels": self.channels,
+            "n_states": self.n_states,
+            "state_modulo": self.state_modulo,
+            "gamma": self.gamma,
+            "tree_weight": self.tree_weight,
+            "edges": [list(edge) for edge in self.edges],
+            "edge_weights": [float(weight) for weight in self.edge_weights],
+            "root": self.root,
+            "directed_edges": [list(edge) for edge in self.directed_edges],
+            "scoring": "mean negative log Chow-Liu tree likelihood",
+        }
+
+
 def _aggregate(all_scores: torch.Tensor, aggregate: str, topk: int) -> torch.Tensor:
     if aggregate == "none":
         return all_scores
@@ -357,5 +554,3 @@ def _aggregate(all_scores: torch.Tensor, aggregate: str, topk: int) -> torch.Ten
             raise ValueError("topk 必须 >= 1")
         return torch.topk(all_scores, k=k, dim=1).values.mean(dim=1)
     raise ValueError(f"未知 aggregate: {aggregate}")
-
-

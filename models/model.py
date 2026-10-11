@@ -6,6 +6,11 @@ from torch.nn import functional as F
 class Model(nn.Module):
     def __init__(self, args):
         super(Model, self).__init__()
+        self.frequency_representation = getattr(
+            args, "frequency_representation", "amplitude"
+        )
+        self.use_freq = getattr(args, "use_freq", True)
+        self.use_temp = getattr(args, "use_temp", True)
         self.time_recon = Reconstructor(
             i_dim=args.time_recon.in_dim,
             h_dim=args.time_recon.n_hiddens,
@@ -16,7 +21,8 @@ class Model(nn.Module):
             beta=args.beta,
             activation=args.time_recon.activation,
             patch_size=args.time_recon.patch_size,
-            top_k=args.time_recon.top_k
+            top_k=args.time_recon.top_k,
+            patch_stride=args.time_recon.patch_stride,
         )
         self.freq_recon = Reconstructor(
             i_dim=args.freq_recon.in_dim,
@@ -28,7 +34,8 @@ class Model(nn.Module):
             beta=args.beta,
             activation=args.freq_recon.activation,
             patch_size=args.freq_recon.patch_size,
-            top_k=args.freq_recon.top_k
+            top_k=args.freq_recon.top_k,
+            patch_stride=args.freq_recon.patch_stride,
         )
         
         
@@ -62,45 +69,51 @@ class Model(nn.Module):
         # x -> (batch_size, in_dim, seq_len)
         x_t = x.permute(0, 2, 1).contiguous()
         x_fft = torch.fft.rfft(x_t, dim=-1)
-        x_fft_amp = torch.abs(x_fft)
-        x_fft_amp = x_fft_amp.permute(0, 2, 1).contiguous()
-        
-        embedding_loss, x_fft_amp_hat, perplexity, min_encoding_indices  = self.freq_recon(x_fft_amp, mask)
+        if self.frequency_representation == "amplitude":
+            x_fft_rep = torch.abs(x_fft).permute(0, 2, 1).contiguous()
+            embedding_loss, x_fft_rep_hat, perplexity, min_encoding_indices = self.freq_recon(
+                x_fft_rep, mask
+            )
+            x_fft_rep_hat = x_fft_rep_hat.permute(0, 2, 1).contiguous()
+            x_fft_hat_real = x_fft_rep_hat[:, :, :x_fft.shape[-1]] * torch.cos(
+                torch.angle(x_fft)
+            )
+            x_fft_hat_imag = x_fft_rep_hat[:, :, :x_fft.shape[-1]] * torch.sin(
+                torch.angle(x_fft)
+            )
+        elif self.frequency_representation == "real_imag":
+            x_fft_rep = torch.cat(
+                (x_fft.real, x_fft.imag[:, :, 1:-1]), dim=-1
+            ).permute(0, 2, 1).contiguous()
+            embedding_loss, x_fft_rep_hat, perplexity, min_encoding_indices = self.freq_recon(
+                x_fft_rep, mask
+            )
+            x_fft_rep_hat = x_fft_rep_hat.permute(0, 2, 1).contiguous()
+            frequency_length = x_fft.shape[-1]
+            x_fft_hat_real = x_fft_rep_hat[:, :, :frequency_length]
+            x_fft_hat_imag = torch.cat(
+                (
+                    torch.zeros_like(x_fft.imag[:, :, :1]),
+                    x_fft_rep_hat[:, :, frequency_length:],
+                    torch.zeros_like(x_fft.imag[:, :, :1]),
+                ),
+                dim=-1,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported frequency representation: {self.frequency_representation}"
+            )
 
-        # freq to time
-        x_fft_amp_hat_ = x_fft_amp_hat.permute(0, 2, 1).contiguous()
-        x_fft_hat_real = x_fft_amp_hat_[:, :, :x_fft.shape[-1]] * torch.cos(torch.angle(x_fft))
-        x_fft_hat_imag = x_fft_amp_hat_[:, :, :x_fft.shape[-1]] * torch.sin(torch.angle(x_fft))
-        x_hat = torch.fft.irfft(torch.complex(x_fft_hat_real, x_fft_hat_imag), n=l, dim=-1)
+        x_hat = torch.fft.irfft(
+            torch.complex(x_fft_hat_real, x_fft_hat_imag), n=l, dim=-1
+        )
         x_hat = x_hat.permute(0, 2, 1).contiguous()
-        return embedding_loss, x_hat, x_fft_amp_hat, perplexity, min_encoding_indices
+        return embedding_loss, x_hat, x_fft_rep_hat, perplexity, min_encoding_indices
     
-        # b,l,c = x.shape
-        # # time to freq
         
-        # # x -> (batch_size, in_dim, seq_len)
-        # x_t = x.permute(0, 2, 1).contiguous()
-        # x_fft = torch.fft.rfft(x_t, dim=-1)
-        # x_fft_cat = torch.cat([x_fft.real[:,:,:], x_fft.imag[:,:,1:-1]], dim=-1)
-        # x_fft_cat = x_fft_cat.permute(0, 2, 1).contiguous()
-        
-        # embedding_loss, x_fft_hat, perplexity, min_encoding_indices  = self.freq_recon(x_fft_cat, mask)
-        
-        # # freq to time
-        # x_fft_hat_ = x_fft_hat.permute(0, 2, 1).contiguous()
-        # x_fft_hat_real = x_fft_hat_[:, :, :x_fft.shape[-1]]
-        # x_fft_hat_imag = x_fft_hat_[:, :, x_fft.shape[-1]:]
-        # x_fft_hat_imag = torch.cat([torch.zeros_like(x_fft.imag[:, :, 0:1]),x_fft_hat_imag,torch.zeros_like(x_fft.imag[:, :, -1:])],dim=-1)
-        # x_hat = torch.fft.irfft(torch.complex(x_fft_hat_real, x_fft_hat_imag), n=l, dim=-1)
-        # x_hat = x_hat.permute(0, 2, 1).contiguous()
-        
-        # return embedding_loss, x_hat, x_fft_hat, perplexity, min_encoding_indices
-
-
-        
-    def forward(self, x, mask=None, only_time=False, only_freq=False, indices=False):
+    def forward(self, x, mask=None, indices=False):
         x_ = x    
-        if only_time:
+        if not self.use_freq:
             assert mask is None or isinstance(mask, torch.Tensor) or (isinstance(mask, tuple) and len(mask) == 2,), f"Expected mask to be a torch.Tensor when only_time is True, got {type(mask)}"
             if isinstance(mask, tuple) and len(mask) == 2:
                 mask, _ = mask
@@ -108,7 +121,7 @@ class Model(nn.Module):
             embedding_loss2, x_hat2, perplexity2,min_encoding_indices2 = torch.zeros_like(embedding_loss1), torch.zeros_like(x_hat1), torch.zeros_like(perplexity1), torch.zeros_like(min_encoding_indices1)
             x_hat = x_hat1
             embedding_loss = embedding_loss1
-        elif only_freq:
+        elif not self.use_temp:
             assert mask is None or isinstance(mask, torch.Tensor) or (isinstance(mask, tuple) and len(mask) == 2,), f"Expected mask to be a torch.Tensor when only_freq is True, got {type(mask)}"
             if isinstance(mask, tuple) and len(mask) == 2:
                 _, mask = mask

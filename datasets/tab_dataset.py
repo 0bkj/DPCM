@@ -17,15 +17,12 @@ class TABDataset(Dataset):
         self.load_data()
         if "swat" in file.lower():
             # self.down_sample(50)
-            chs = [i for i in range(0, 51)]
-            chs.remove(5)
-            self.select_channel(chs) 
-            # self.select_channel([0,1,2,3,4,5])
+            ...
         elif "msl" in file.lower():
             self.select_channel([0])
-        # elif "psm" in file.lower():
+        elif "psm" in file.lower():
             # self.down_sample(20)
-        
+            ...
     
     def load_meta(self):
         meta_file = os.path.join("data","tab", "DETECT_META.csv")
@@ -45,11 +42,6 @@ class TABDataset(Dataset):
             self.label = np.zeros(self.data.shape[0])
             scaler.fit(self.data)
             self.data = scaler.transform(self.data)
-            # Apply data ratio sampling
-            if self.data_ratio < 1.0:
-                num_samples = int(len(self.data) * self.data_ratio)
-                self.data = self.data[:num_samples]
-                self.label = self.label[:num_samples]
         elif self.split == 'test':
             train = data.values[:self.train_lens,:-1]
             train = np.nan_to_num(train)
@@ -76,8 +68,11 @@ class TABDataset(Dataset):
         return np.float32(x), np.float32(y)
     
     def down_sample(self,step):
-        self.data = self.data[::step]
-        self.label = self.label[::step]
+        old_data = self.data
+        old_label = self.label
+        self.data = old_data[::step].copy()
+        self.label = old_label[::step].copy()
+        del old_data, old_label
         print(f"down sample data with step {step} data shape {self.data.shape}")
     
     def select_channel(self,channel):
