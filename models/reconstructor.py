@@ -21,17 +21,11 @@ class Reconstructor(nn.Module):
         super().__init__()
         self.patch_size = patch_size
         self.patch_stride = patch_stride
-        # if self.patch_stride != self.patch_size // 2:
-        #     raise ValueError(
-        #         "DPR requires half-stride overlapping patches: "
-        #         "patch_stride must equal floor(patch_size / 2)"
         #     )
         self.encoder = Encoder(patch_size, h_dim, n_res_layers, res_h_dim, activation)
         self.proj1 = nn.Linear(h_dim, embedding_dim)
         self.prototype_retrieval = PrototypeRetrieval(i_dim* n_embeddings, embedding_dim, beta,k=top_k)
-        self.mask = torch.zeros(i_dim, i_dim * n_embeddings)  # (c, n_e)
-        for i in range(i_dim):
-            self.mask[i, i * n_embeddings:(i + 1) * n_embeddings] = 1.0
+        self.n_variables = i_dim
         self.n_embeddings = i_dim * n_embeddings
         self.proj2 = nn.Linear(embedding_dim, h_dim)
         self.decoder = Decoder(h_dim, patch_size, n_res_layers, res_h_dim, activation)
@@ -44,7 +38,7 @@ class Reconstructor(nn.Module):
 
         x = einops.rearrange(x, 'b t c -> (b c) t')
 
-        # Cover every input point with a complete 50%-overlapping patch.
+        # Right-pad to complete the final patch.
         if t <= self.patch_size:
             padded_length = self.patch_size
         else:
@@ -60,14 +54,16 @@ class Reconstructor(nn.Module):
         z_e = self.proj1(z_e)
         z_e = einops.rearrange(z_e, 'b n h -> b h n')
 
-        n = z_e.shape[2]
-        masked = einops.rearrange(self.mask, 'c n -> 1 c 1 n').expand(b, -1, n, -1).reshape(b * c * n, -1).to(dtype=torch.bool,device=z_e.device)
-        embedding_loss, z_q, perplexity, indices = self.prototype_retrieval(z_e, masked)
+        if c != self.n_variables:
+            raise ValueError(f"Expected {self.n_variables} variables, got {c}")
+        embedding_loss, z_q, perplexity, indices = self.prototype_retrieval(
+            z_e, num_variables=c
+        )
             
         z_q = einops.rearrange(z_q, 'b h n -> b n h')
         z_q = self.proj2(z_q)
         z_q = self.decoder(z_q)
-        # Decode 50%-overlapping patches with average overlap-add.
+        # Average values where decoded patches overlap.
         z_q = F.fold(
             z_q.transpose(1, 2).contiguous(),
             output_size=(1, padded_length),

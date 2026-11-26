@@ -1,3 +1,5 @@
+from bisect import bisect_right
+from itertools import accumulate
 from torch.utils.data import Dataset
 import pandas as pd
 import numpy as np
@@ -6,24 +8,36 @@ from sklearn.preprocessing import StandardScaler,MinMaxScaler
 from argparse import Namespace
 
 class TABDataset(Dataset):
-    def __init__(self,file, split, window_size, step, data_ratio=1.0):
+    SAMPLE_STRIDES = {"psm.csv": 20, "swat.csv": 50}
+
+    @classmethod
+    def sample_stride_for(cls, file):
+        return cls.SAMPLE_STRIDES.get(os.path.basename(file).lower(), 1)
+
+    def __init__(self, file, split, window_size, step, data_ratio=1.0, sample_stride=None):
         super(TABDataset, self).__init__()
         self.file = file
         self.split = split
         self.window_size = window_size 
         self.step = step 
         self.data_ratio = data_ratio
+        self.sample_stride = self.sample_stride_for(file) if sample_stride is None else sample_stride
+        if type(self.sample_stride) is not int or self.sample_stride <= 0:
+            raise ValueError("sample_stride must be a positive integer")
+
         self.load_meta()
         self.load_data()
-        if "swat" in file.lower():
-            # self.down_sample(50)
-            ...
-        elif "msl" in file.lower():
+        self.offset_window_ends = None
+        if "msl" in file.lower():
             self.select_channel([0])
-        elif "psm" in file.lower():
-            # self.down_sample(20)
-            ...
-    
+        if self.sample_stride > 1:
+            if split == "train":
+                counts = (self.window_count(len(self.data[offset::self.sample_stride]))
+                          for offset in range(self.sample_stride))
+                self.offset_window_ends = tuple(accumulate(counts))
+            else:
+                self.down_sample(self.sample_stride)
+
     def load_meta(self):
         meta_file = os.path.join("data","tab", "DETECT_META.csv")
         meta_df = pd.read_csv(meta_file)
@@ -58,15 +72,28 @@ class TABDataset(Dataset):
             self.data = scaler.transform(self.data)
         print(f"Loaded {self.split} data with shape {self.data.shape} and labels with shape {self.label.shape}")
     
+    def window_count(self, length):
+        return max(0, (length - self.window_size) // self.step + 1)
+
     def __len__(self):
-        return (self.data.shape[0] - self.window_size) // self.step + 1
-    
+        if self.offset_window_ends is not None:
+            return self.offset_window_ends[-1]
+        return self.window_count(len(self.data))
+
     def __getitem__(self, index):
-        index = index * self.step
-        x = self.data[index: index + self.window_size]
-        y = self.label[index: index + self.window_size]
-        return np.float32(x), np.float32(y)
-    
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        if self.offset_window_ends is None:
+            start = index * self.step
+            stride = 1
+        else:
+            stride = self.sample_stride
+            offset = bisect_right(self.offset_window_ends, index)
+            preceding = self.offset_window_ends[offset - 1] if offset else 0
+            start = offset + (index - preceding) * self.step * stride
+        samples = slice(start, start + self.window_size * stride, stride)
+        return np.float32(self.data[samples]), np.float32(self.label[samples])
+
     def down_sample(self,step):
         old_data = self.data
         old_label = self.label

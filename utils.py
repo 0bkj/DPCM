@@ -51,8 +51,7 @@ def save_model_and_results(
     hyperparameters,
     timestamp,
     *,
-    epoch=None,
-    global_step=None,
+    global_step,
     seed=None,
 ):
     SAVE_MODEL_PATH = os.getcwd() + '/results'
@@ -61,7 +60,6 @@ def save_model_and_results(
         'model': model.state_dict(),
         'results': results,
         'hyperparameters': hyperparameters,
-        'epoch': epoch,
         'global_step': global_step,
         'seed': seed,
     }

@@ -1,8 +1,4 @@
-import torchvision.datasets as datasets
-import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
-import os
-import numpy as np
 
 def data_loaders(dataset, split, batch_size):
     if split == "train":
@@ -28,7 +24,7 @@ def data_loaders(dataset, split, batch_size):
     return loader
 
 
-def load_data_and_data_loaders(file,split,window_size,step,batch_size,data_ratio=1.0):
+def load_data_and_data_loaders(file, split, window_size, step, batch_size, data_ratio=1.0, sample_stride=None):
     if file.startswith("tsb"):
         from datasets.tsb_dataset import TSBDataset
         # remove the prefix "tsb_" from the file name
@@ -36,7 +32,10 @@ def load_data_and_data_loaders(file,split,window_size,step,batch_size,data_ratio
         dataset = TSBDataset(file=file,split=split,window_size=window_size, step=step)
     elif file.endswith(".csv"):
         from datasets.tab_dataset import TABDataset
-        dataset = TABDataset(file=file,split=split,window_size=window_size, step=step, data_ratio=data_ratio)
+        dataset = TABDataset(
+            file=file, split=split, window_size=window_size, step=step,
+            data_ratio=data_ratio, sample_stride=sample_stride,
+        )
     elif file.endswith(".npy"):
         from datasets.indices_dataset import IndicesDataset
         dataset = IndicesDataset(file=file,split=split,window_size=window_size, step=step, data_ratio=data_ratio)

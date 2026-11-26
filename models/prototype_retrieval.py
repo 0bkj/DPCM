@@ -9,7 +9,7 @@ class PrototypeRetrieval(nn.Module):
     Inputs:
     - n_e : number of embeddings
     - e_dim : dimension of embedding
-    - beta : commitment cost used in loss term, beta * ||z_e(x)-sg[e]||^2
+    - beta : weight for the retrieved prototype term with detached encoder output
     - k : number of top embeddings to select (default: 3 for Top-K VQ)
     - tau : temperature for softmax
     """
@@ -25,12 +25,15 @@ class PrototypeRetrieval(nn.Module):
         self.embedding = nn.Embedding(self.n_e, self.e_dim)
         self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
 
-    def forward(self, z, masked=None):
+    def forward(self, z, masked=None, *, num_variables=None):
         """
         Inputs:
             z: (batch, channel, length)
             masked: None, or (batch*length, n_e) for per-sample mask
         """
+        if num_variables is not None:
+            return self.retrieve_by_variable(z, num_variables)
+
         # reshape z -> (batch, length, channel) and flatten
         b, c, l = z.shape
         z = z.permute(0, 2, 1).contiguous()
@@ -73,3 +76,29 @@ class PrototypeRetrieval(nn.Module):
         z_q = z_q.permute(0, 2, 1).contiguous()
 
         return loss, z_q, perplexity, min_encoding_indices
+
+    def retrieve_by_variable(self, z, num_variables):
+        """Search only the assigned prototype block and return global indices."""
+        bank = self.embedding.weight.reshape(num_variables, -1, self.e_dim)
+        queries = einops.rearrange(z, '(b c) d l -> c (b l) d', c=num_variables)
+        distances = (
+            queries.square().sum(dim=-1, keepdim=True)
+            + bank.square().sum(dim=-1).unsqueeze(1)
+            - 2 * torch.bmm(queries, bank.transpose(1, 2))
+        )
+        probabilities = F.softmax(-distances / self.tau, dim=-1)
+        weights, indices = probabilities.topk(self.k, dim=-1)
+        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-10)
+        offsets = torch.arange(num_variables, device=z.device) * bank.shape[1]
+        indices = indices + offsets[:, None, None]
+        selected = self.embedding(indices)
+        quantized = (weights.to(selected.dtype).unsqueeze(-1) * selected).sum(dim=-2)
+        z_q = einops.rearrange(quantized, 'c (b l) d -> (b c) d l', l=z.shape[-1]).contiguous()
+        loss = (z_q.detach() - z).square().mean() + self.beta * (z_q - z.detach()).square().mean()
+
+        usage = weights.new_zeros(self.n_e)
+        usage.scatter_add_(0, indices.flatten(), weights.flatten())
+        usage = usage / (queries.shape[0] * queries.shape[1])
+        perplexity = torch.exp(-torch.sum(usage * torch.log(usage + 1e-10)))
+        indices = einops.rearrange(indices, 'c (b l) k -> (b c) l k', l=z.shape[-1])
+        return loss, z_q, perplexity, indices

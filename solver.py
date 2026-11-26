@@ -4,6 +4,7 @@ import einops
 import torch.nn as nn
 import torch.optim as optim
 from datasets.loader import load_data_and_data_loaders
+from datasets.tab_dataset import TABDataset
 import utils as utils
 import numpy as np
 import torch
@@ -20,6 +21,10 @@ logger = logging.getLogger(__name__)
 class Solver:
     def __init__(self, args):
         self.args = args
+        configured_stride = getattr(args, "sample_stride", None)
+        self.sample_stride = (
+            TABDataset.sample_stride_for(args.dataset) if configured_stride is None else configured_stride
+        )
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.debug(f"@ Using device: {self.device}")
         self.create_model()
@@ -37,7 +42,8 @@ class Solver:
                     window_size=self.args.window_size,
                     step=1,
                     batch_size=self.args.batch_size,
-                    data_ratio=1.0
+                    data_ratio=1.0,
+                    sample_stride=self.sample_stride,
                 )
                 self.train_dataset = dataset
                 self.train_loader = loader
@@ -51,7 +57,8 @@ class Solver:
                     window_size=self.args.window_size,
                     step=self.args.window_size,
                     batch_size=self.args.batch_size,
-                    data_ratio=1.0
+                    data_ratio=1.0,
+                    sample_stride=self.sample_stride,
                 )
                 self.test_dataset = dataset
                 self.test_loader = loader
@@ -65,7 +72,8 @@ class Solver:
                     window_size=self.args.window_size,
                     step=self.args.window_size,
                     batch_size=self.args.batch_size,
-                    data_ratio=1.0
+                    data_ratio=1.0,
+                    sample_stride=self.sample_stride,
                 )
                 self.val_dataset = dataset
                 self.val_loader = loader
@@ -82,12 +90,21 @@ class Solver:
             self.args
         ).to(self.device)
 
-    def load_model(self):
+    def load_model(self, required_steps=None):
         try:
             if not hasattr(self, "loaded"):
-                self.model.load_state_dict(
-                    torch.load(f"./results/{self.args.filename}_seed{self.args.seed}.pth", weights_only=False)["model"]
+                checkpoint = torch.load(
+                    f"./results/{self.args.filename}_seed{self.args.seed}.pth",
+                    map_location=self.device,
+                    weights_only=False,
                 )
+                if required_steps is not None and (
+                    checkpoint.get("global_step") != required_steps
+                    or checkpoint.get("hyperparameters", {}).get("max_steps") != required_steps
+                    or checkpoint.get("hyperparameters", {}).get("sample_stride", 1) != self.sample_stride
+                ):
+                    return False
+                self.model.load_state_dict(checkpoint["model"])
                 self.model.eval()
                 print("@ loaded VQ-VAE model from ./results/" + self.args.filename + ".pth")
                 print("@ set model to eval mode")
@@ -174,9 +191,8 @@ class Solver:
         return ori_data, recon_data, labels, losses
     
     def train(self):
-        """
-        Set up optimizer and training loop
-        """
+        """Train for the configured number of optimizer updates."""
+        max_steps = self.args.max_steps
         print("\n\n"+"-" * 20 + "Train" + "-" * 20)
         params_group = [
             {
@@ -194,29 +210,43 @@ class Solver:
         optimizer = optim.AdamW(
             params_group, lr=self.args.learning_rate, amsgrad=True
         )
-        training_data, training_loader = self.load_data(split="train")
+        _, training_loader = self.load_data(split="train")
+        if len(training_loader) == 0:
+            raise ValueError("Training loader contains no batches")
 
         self.results = {}
-        total_updates = 0
         self.active_codes = None
-        for epoch in tqdm(range(1, self.args.epochs + 1), desc="Training Epochs"):
-            for x, _ in tqdm(training_loader, desc=f"Epoch {epoch}", leave=False):
-                x = x.to(self.device, non_blocking=True)
-                optimizer.zero_grad()
-                loss = self.train_update(x)
-                loss.backward()
-                optimizer.step()
-                total_updates += 1
-            tqdm.write(f'Update # {total_updates},Recon Error: {(self.results["recon_errors"]):.4f}, Emb_loss: {(self.results["emb_loss"]):.4f}, time_Perplexity: {(self.results["time_perplexities"]):.0f}, freq_Perplexity: {(self.results["freq_perplexities"]):.0f}')
+        batches = iter(training_loader)
+        for step in tqdm(range(1, max_steps + 1), desc="Training", unit="step"):
+            batch = next(batches, None)
+            if batch is None:
+                batches = iter(training_loader)
+                batch = next(batches)
+            x, _ = batch
+            x = x.to(self.device, non_blocking=True)
+            optimizer.zero_grad()
+            loss = self.train_update(x)
+            loss.backward()
+            optimizer.step()
+            if step % self.args.log_interval == 0 or step == max_steps:
+                tqdm.write(
+                    f'Update # {step}/{max_steps}, '
+                    f'Recon MSE: {self.results["recon_errors"]:.4f}, '
+                    f'Prototype loss: {self.results["emb_loss"]:.4f}, '
+                    f'Temporal perplexity: {self.results["time_perplexities"]:.4f}, '
+                    f'Frequency perplexity: {self.results["freq_perplexities"]:.4f}'
+                )
         if self.args.save:
             utils.save_model_and_results(
                 self.model,
                 self.results,
-                vars(self.args).copy(),
+                {**vars(self.args), 'sample_stride': self.sample_stride},
                 f"{self.args.filename}_seed{self.args.seed}",
-                epoch=self.args.epochs,
-                global_step=total_updates,
+                global_step=max_steps,
+                seed=self.args.seed,
             )
+        self.model.eval()
+        self.loaded = True
         print("-" * 20 + "End Train" + "-" * 20)
              
     def visual_train(self):

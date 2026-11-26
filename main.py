@@ -1,39 +1,20 @@
-import os
-# 在导入 numpy, sklearn 之前设置
-os.environ['OPENBLAS_NUM_THREADS'] = '64'  # 限制为 64 个线程，安全且高效
-os.environ['OMP_NUM_THREADS'] = '64'       # 防止 OpenMP 也产生冲突
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "3")
 import argparse
 import utils
-import shutil
 import logging
-from logging.handlers import RotatingFileHandler
 import json
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(levelname)s] %(message)s',
-    handlers=[
-        RotatingFileHandler(
-            "zzzz.log",
-            maxBytes=100_000,
-            backupCount=1,
-            encoding='utf-8'
-        ),
-        logging.StreamHandler()  # 同时输出到控制台
-    ],
-)
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
 logger = logging.getLogger(__name__)
 
-def init(default_config="config/visual/swat.yaml"):
+def init(default_config=None):
     parser = argparse.ArgumentParser()
 
-    # allow specifying a YAML configuration file; defaults to config/config.yaml
     parser.add_argument(
         "--config",
         type=str,
         default=default_config,
+        required=default_config is None,
         help="path to YAML config file (values overridden by CLI arguments)",
     )
     initial_args, _ = parser.parse_known_args()
@@ -45,7 +26,10 @@ def init(default_config="config/visual/swat.yaml"):
     parser.add_argument("--mode", type=str, default="train")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--window_size", type=int, default=100)
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument(
+        "--max_steps", type=int, default=5000,
+        help="Number of optimizer updates per seed (default: 5000).",
+    )
     
     parser.add_argument("--time_recon", type=json.loads, default=None)
     parser.add_argument("--freq_recon", type=json.loads, default=None)
@@ -54,7 +38,11 @@ def init(default_config="config/visual/swat.yaml"):
     parser.add_argument("--beta", type=float, default=.25)
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--log_interval", type=int, default=50)
-    parser.add_argument("--dataset",  type=str)
+    parser.add_argument("--dataset", type=str)
+    parser.add_argument(
+        "--sample_stride", type=int, default=None,
+        help="Downsampling factor for TAB data. Use 1 for the original sampling rate.",
+    )
     parser.add_argument("--seeds", type=int, nargs="+", default=[0])
     parser.add_argument(
         "--metrics",
@@ -75,7 +63,7 @@ def init(default_config="config/visual/swat.yaml"):
     )
 
     # whether or not to save model
-    parser.add_argument("-save", action="store_true")
+    parser.add_argument("-save", "--save", action="store_true")
     parser.add_argument("--filename",  type=str, default=timestamp)
     parser.add_argument("--visual_channel", type=list, default=None, help="Channel to visualize; if not specified, will select [0,1,2]")
 
@@ -89,6 +77,13 @@ def init(default_config="config/visual/swat.yaml"):
     config_dicts = {k: config_values.get(k, None) for k in DICT_KEYS}
     parser.set_defaults(**config_values)
     args = parser.parse_args()
+    if args.sample_stride is not None and (type(args.sample_stride) is not int or args.sample_stride <= 0):
+        parser.error("sample_stride must be a positive integer")
+    if "train" in args.mode.split():
+        if type(args.max_steps) is not int or args.max_steps <= 0:
+            parser.error("training requires a positive integer max_steps")
+        if type(args.log_interval) is not int or args.log_interval <= 0:
+            parser.error("training requires a positive integer log_interval")
 
     for key in DICT_KEYS:
         base = config_dicts.get(key) or {}
@@ -105,21 +100,20 @@ def init(default_config="config/visual/swat.yaml"):
     return args
 
 if __name__ == "__main__":
-    from solver import Solver
-
     args = init()
 
-    shutil.rmtree("./data/indices", ignore_errors=True)
-    shutil.rmtree(f"./visual/{args.filename}", ignore_errors=True)
+    from solver import Solver
     args.mode = args.mode.split()
     for seed in args.seeds:
         utils.set_seed(seed)
         args.seed = seed
         solver = Solver(args)
         if "train" in args.mode:
-            if not solver.load_model():
+            if not solver.load_model(required_steps=args.max_steps):
                 solver.train()
         if "test" in args.mode:
+            if "train" not in args.mode and not solver.load_model():
+                raise FileNotFoundError(f"No usable checkpoint for {args.filename}, seed {seed}")
             solver.test()
         if "visual" in args.mode:
             solver.visual_train()
